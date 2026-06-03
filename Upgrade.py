@@ -1,18 +1,35 @@
 # Upgrade.py
-# CoreOS GUI Desktop Upgrade
-# Installs CoreGUI, GUIRunner, and patches boot + CoreOS to enable GUI default mode
+# CoreOS Bulletproof GUI Upgrade
+# - Installs /System/GUI/CoreGUI.py and GUIRunner.py
+# - Ensures CoreOS has start_gui()
+# - Ensures boot.py launches GUI after login
+# - Never overwrites boot/CoreOS logic, only patches
 
 import os
 import time
 
-print("[Upgrade] Starting CoreOS GUI upgrade...")
+print("[Upgrade] Starting CoreOS GUI upgrade (bulletproof)...")
 
-BASE = "CoreOS/System/GUI"
-os.makedirs(BASE, exist_ok=True)
+# ---------- Helpers ----------
 
-# ---------------------------------------------------------
-# 1. Install CoreGUI.py
-# ---------------------------------------------------------
+def safe_write(path, content):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+def file_read(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+def file_write(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(data)
+
+# ---------- 1. Install CoreGUI.py ----------
+
+gui_base = "CoreOS/System/GUI"
+os.makedirs(gui_base, exist_ok=True)
+
 coregui_code = r'''
 import tkinter as tk
 
@@ -94,14 +111,11 @@ class CoreGUI:
         self.root.mainloop()
 '''
 
-with open(f"{BASE}/CoreGUI.py", "w", encoding="utf-8") as f:
-    f.write(coregui_code)
-
+safe_write(os.path.join(gui_base, "CoreGUI.py"), coregui_code)
 print("[Upgrade] Installed CoreGUI.py")
 
-# ---------------------------------------------------------
-# 2. Install GUIRunner.py (future GUI apps)
-# ---------------------------------------------------------
+# ---------- 2. Install GUIRunner.py (placeholder) ----------
+
 guirunner_code = r'''
 class GUIRunner:
     def __init__(self, coregui):
@@ -111,57 +125,86 @@ class GUIRunner:
         print("[GUIRunner] GUI app launching not implemented yet.")
 '''
 
-with open(f"{BASE}/GUIRunner.py", "w", encoding="utf-8") as f:
-    f.write(guirunner_code)
-
+safe_write(os.path.join(gui_base, "GUIRunner.py"), guirunner_code)
 print("[Upgrade] Installed GUIRunner.py")
 
-# ---------------------------------------------------------
-# 3. Patch CoreOS.py to enable GUI default mode
-# ---------------------------------------------------------
+# ---------- 3. Ensure CoreOS has start_gui() ----------
+
 coreos_path = "CoreOS/System/CoreOS.py"
-
 if os.path.exists(coreos_path):
-    with open(coreos_path, "r", encoding="utf-8") as f:
-        coreos_code = f.read()
+    code = file_read(coreos_path)
 
-    if "start_gui" not in coreos_code:
-        coreos_code = coreos_code.replace(
-            "if osys.login():",
-            "if osys.login():\n        osys.start_gui()"
-        )
+    if "def start_gui(" not in code:
+        print("[Upgrade] Adding start_gui() to CoreOS class...")
 
-        with open(coreos_path, "w", encoding="utf-8") as f:
-            f.write(coreos_code)
+        marker = "class CoreOS"
+        idx = code.find(marker)
+        if idx == -1:
+            print("[Upgrade] ERROR: class CoreOS not found in CoreOS.py")
+        else:
+            line_end = code.find("\n", idx)
+            if line_end == -1:
+                line_end = len(code)
 
-        print("[Upgrade] Patched CoreOS.py to enable GUI default mode")
+            insert_pos = line_end + 1
+
+            start_gui_method = r'''
+    def start_gui(self):
+        from System.GUI.CoreGUI import CoreGUI
+        self.gui = CoreGUI(self)
+        self.gui.start()
+'''
+
+            new_code = code[:insert_pos] + start_gui_method + code[insert_pos:]
+            file_write(coreos_path, new_code)
+            print("[Upgrade] start_gui() added to CoreOS.py")
     else:
-        print("[Upgrade] CoreOS.py already GUI-enabled")
+        print("[Upgrade] CoreOS.py already has start_gui()")
 else:
-    print("[Upgrade] CoreOS.py missing, cannot patch")
+    print("[Upgrade] WARNING: CoreOS.py not found, cannot patch start_gui()")
 
-# ---------------------------------------------------------
-# 4. Patch boot.py to call GUI automatically
-# ---------------------------------------------------------
+# ---------- 4. Ensure boot.py launches GUI after login ----------
+
 boot_path = "boot.py"
-
 if os.path.exists(boot_path):
-    with open(boot_path, "r", encoding="utf-8") as f:
-        boot_code = f.read()
+    bcode = file_read(boot_path)
 
-    if "start_gui" not in boot_code:
-        boot_code = boot_code.replace(
-            "if osys.login():",
-            "if osys.login():\n        osys.start_gui()"
-        )
-
-        with open(boot_path, "w", encoding="utf-8") as f:
-            f.write(boot_code)
-
-        print("[Upgrade] Patched boot.py to launch GUI")
+    if "osys.start_gui()" in bcode:
+        print("[Upgrade] boot.py already launches GUI")
     else:
-        print("[Upgrade] boot.py already GUI-enabled")
-else:
-    print("[Upgrade] boot.py missing, cannot patch")
+        print("[Upgrade] Patching boot.py to launch GUI after login...")
 
-print("[Upgrade] CoreOS GUI upgrade complete.")
+        marker = "if osys.login():"
+        idx = bcode.find(marker)
+        if idx == -1:
+            print("[Upgrade] WARNING: could not find 'if osys.login():' in boot.py")
+        else:
+            line_end = bcode.find("\n", idx)
+            if line_end == -1:
+                line_end = len(bcode)
+            insert_pos = line_end + 1
+
+            indent = ""
+            # detect indentation of the marker line
+            line_start = bcode.rfind("\n", 0, idx)
+            if line_start == -1:
+                line_start = 0
+            else:
+                line_start += 1
+            while line_start < idx and bcode[line_start] in (" ", "\t"):
+                indent += bcode[line_start]
+                line_start += 1
+
+            gui_line = f"{indent}    osys.start_gui()\n"
+            new_bcode = bcode[:insert_pos] + gui_line + bcode[insert_pos:]
+            file_write(boot_path, new_bcode)
+            print("[Upgrade] boot.py patched to call osys.start_gui()")
+else:
+    print("[Upgrade] WARNING: boot.py not found, cannot patch GUI launch")
+
+# ---------- 5. Done ----------
+
+with open("CoreOS/System/Logs/update.log", "a", encoding="utf-8") as log:
+    log.write(f"[{time.ctime()}] Bulletproof GUI upgrade applied\n")
+
+print("[Upgrade] CoreOS bulletproof GUI upgrade complete.")
